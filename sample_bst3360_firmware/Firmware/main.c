@@ -501,7 +501,7 @@ int main(void)
 			union motion_data _x, _y;
 			SS_LOW;
 			spi_send(0x50);
-			delay_us(35);
+			_delay_us(35);
 			spi_send(0x00); // motion, not used
 			spi_send(0x00); // observation, not used
 			_x.lo = spi_recv();

@@ -1,4 +1,6 @@
 CAD_models
 schematics/Mouse-backups
-datasheets/PMW3360DM-T2QU_datasheet.pdf
-*.zip
+datasheets
+**/*.zip
+**/OldVersions
+**/Debug
