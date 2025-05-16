@@ -34,13 +34,13 @@
 #include "pmw3360_registers.h"
 
 void init_pins();
-void toggle_led();
 void init_pwm();
 static void init_spi();
 static inline void spi_send(const uint8_t);
 static inline uint8_t spi_recv();
 static void init_pmw3360(const uint8_t);
 void set_rgb(uint8_t, uint8_t, uint8_t);
+uint8_t reverse_bits(uint8_t);
 
 // use this instead of bitshifts or LSB/MSB macros.
 union MotionData {
@@ -50,30 +50,18 @@ union MotionData {
 
 volatile int8_t dmwheel = 0;
 
+volatile uint8_t dpi_index = 1;
+const uint8_t dpi_profiles[] = {3, 7, 19, 39, 119}; // 400, 800, 2000, 4000, 12000
+const uint8_t dpi_colours[][3] = {{255, 90, 90}, {225, 255, 90}, {90, 255, 180}, {90, 115, 255}, {150, 90, 255}}; // red, yellow, teal, blue, lavender
+#define DPI_PROFILE_COUNT sizeof(dpi_profiles) / sizeof(dpi_profiles[0])
+
+#define NEO_PORT PORTB
+#define NEO_PIN PORTB5
+
+volatile uint8_t overflow_count = 0;
+
 void init_pins(void)
 {
-    
-	#if defined(VERSION_1_2)
-    // RED LED
-	DDRD |= (1 << PORTD6);
-	
-	// RGB LED
-	DDRB |= (1 << PORTB6) | (1 << PORTB5); // RGB green, RGB red
-	PORTB |= (1 << PORTB6) | (1 << PORTB5);
-	DDRD |= (1 << PORTD7); // RGB blue
-	PORTD |= (1 << PORTD7);
-
-    // mouse buttons: L, R, Side 1, Side 2, MWheel button
-	DDRD &= ~((1 << PORTD0) | (1 << PORTD1) | (1 << PORTD3) | (1 << PORTD4) | (1 << PORTD5));
-	PORTD |= (1 << PORTD0) | (1 << PORTD1) | (1 << PORTD3) | (1 << PORTD4) | (1 << PORTD5); // enable pullups
-
-    // MWheel
-	DDRE &= ~(1 << PORTE6);
-	DDRD &= ~(1 << PORTD2);
-	PORTE |= (1 << PORTE6); // enable pullups
-	PORTD |= (1 << PORTD2);
-
-	#elif defined(VERSION_2_0)
 	// mouse buttons: L, R, Side 1, Side 2, MWheel button
 	DDRD &= ~((1 << PORTD3) | (1 << PORTD2) | (1 << PORTD4) | (1 << PORTD6) | (1 << PORTD5));
 	PORTD |= (1 << PORTD3) | (1 << PORTD2) | (1 << PORTD4) | (1 << PORTD6) | (1 << PORTD5); // enable pullups
@@ -81,19 +69,25 @@ void init_pins(void)
     // MWheel
 	DDRD &= ~((1 << PORTD0) | (1 << PORTD1));
 	PORTD |= (1 << PORTD0) | (1 << PORTD1); // enable pullups
-
-	#endif
+	
+	// dpi button
+	DDRB &= ~(1 << PORTB4);
+	PORTB |= (1 << PORTB4); // enable pullups
+	
+	// neopixel data
+	DDRB |= (1 << PORTB5);
 }
 
 void init_interrupts()
 {
-    #if defined(VERSION_1_2)
-	EICRB |= (1 << ISC60); // int triggers on either falling or rising edge
-	EIMSK |= (1 << INT6);
-    #elif defined(VERSION_2_0)
+	// mwheel
     EICRA |= (1 << ISC00); // int triggers on either falling or rising edge
     EIMSK |= (1 << INT0);
-    #endif
+	
+	// dpi button
+	PCICR |= (1 << PCIE0); // enable pin change interrupt
+	PCMSK0 |= (1 << PCINT4); // PB4
+
 	sei(); // enable global interrupts
 }
 
@@ -147,7 +141,7 @@ static void init_pmw3360(const uint8_t dpi)
 
 	// shutdown first
 	SS_LOW;
-	spiWrite(0x3b, 0xb6);
+	spiWrite(SHUTDOWN, 0xb6);
 	SS_HIGH;
 	_delay_ms(300);
 
@@ -159,7 +153,7 @@ static void init_pmw3360(const uint8_t dpi)
 
 	// power up reset
 	SS_LOW;
-	spiWrite(0x3a, 0x5a);
+	spiWrite(POWER_UP_RESET, 0x5a);
 	SS_HIGH;
 	_delay_ms(50);
 
@@ -172,12 +166,12 @@ static void init_pmw3360(const uint8_t dpi)
 	spiRead(0x06);
 
 	// srom download
-	spiWrite(0x10, 0x00);
-	spiWrite(0x13, 0x1d);
+	spiWrite(CONFIG2, 0x00);
+	spiWrite(SROM_ENABLE, 0x1d);
 	SS_HIGH;
 	_delay_ms(10);
 	SS_LOW;
-	spiWrite(0x13, 0x18);
+	spiWrite(SROM_ENABLE, 0x18);
 
 	spi_send(0x62 | 0x80);
 	for (uint16_t i = 0; i < SROM_LENGTH; i++) {
@@ -190,22 +184,16 @@ static void init_pmw3360(const uint8_t dpi)
 
 	// configuration/settings
 	SS_LOW;
-	spiWrite(0x10, 0x00); // Rest mode & independent X/Y DPI disabled
-	spiWrite(0x0d, 0x00); // Camera angle
-	spiWrite(0x11, 0x00); // Camera angle fine tuning
-	spiWrite(0x0f, dpi); // DPI
+	spiWrite(CONFIG2, 0x00); // Rest mode & independent X/Y DPI disabled
+	spiWrite(CONTROL, 0x00); // Camera angle
+	spiWrite(ANGLE_TUNE, 0x00); // Camera angle fine tuning
+	spiWrite(CONFIG1, dpi); // DPI
 	// LOD Stuff
-	spiWrite(0x63, 0x02); // LOD: 0x00 disable lift detection, 0x02 = 2mm, 0x03 = 3mm
-	spiWrite(0x2b, 0x10); // Minimum SQUAL for zero motion data (default: 0x10)
-	spiWrite(0x2c, 0x0a); // Minimum Valid features (reduce SQUAL score) (default: 0x0a)
+	spiWrite(LIFT_CONFIG, 0x03); // LOD: 0x00 disable lift detection, 0x02 = 2mm, 0x03 = 3mm
+	spiWrite(MIN_SQ_RUN, 0x10); // Minimum SQUAL for zero motion data (default: 0x10)
+	spiWrite(RAWDATA_THRESHOLD, 0x0a); // Minimum Valid features (reduce SQUAL score) (default: 0x0a)
 	SS_HIGH;
 	_delay_us(200);
-}
-
-#if defined(VERSION_1_2)
-void toggle_led(void)
-{
-	PORTD ^= (1 << PORTD6); // red LED on PD6
 }
 
 void init_pwm()
@@ -214,87 +202,256 @@ void init_pwm()
 	sreg = SREG; // Save global interrupt flag
 	cli(); // Disable interrupts
 
-	OCR1A = 90*255/100; // RGB red duty cycle
-	OCR1B = 90*255/100; // green duty cycle
-	OCR4C = 255; // p. 171 in fast PWM mode, timer 4 uses OCR4C reg for TOP
-	OCR4D = 90*255/100; // blue duty cycle
-	
-	// Timer 1 for RGB red (PB5/OC1A)
-	TCCR1A = (1 << COM1A1) | (1 << COM1B1) | (1 << WGM10); // WGM mode 5
-	TCCR1B = (1 << WGM12) | (1 << CS12) | (1 << CS10); // clk prescaler = 1024
-	
-	// Timer 4 for RGB green (PB6/OC4B) and blue (PD7/OC4D)
-	TCCR4B = (1 << CS43) | (1 << CS41) | (1 << CS40); // clk prescaler = 1024
-	TCCR4C = (1 << COM4D1) | (1 << PWM4D);
+	// Timer 4
+	OCR4B = 10; // 50% duty
+	OCR4C = 20;
+	TCCR4A = (1 << COM4B0) | (1 << PWM4B); // clear on compare match 
+	TCCR4B = (1 << CS40); // enable timer, no prescaler
 	TCCR4D &= 0b11111100; // waveform generator mode 4[1:0] = 00, fast PWM
+	
+	TIMSK4 = (1 << TOIE4);
 	
 	SREG = sreg; // Restore global interrupt flag
 }
 
-void set_rgb(uint8_t r, uint8_t g, uint8_t b)
+ISR(TIMER4_OVF_vect)
 {
-	unsigned char sreg;
-	uint8_t red, green, blue;
-	
-	red = 255 - r;
-	green = 255 - g;
-	blue = 255 - b;
-	//blue = blue / 255.0 * 100;
-	
-	sreg = SREG;
-	cli();
-	
-	OCR1A = red;
-	OCR1B = green;
-	OCR4D = blue;
-	
-	SREG = sreg;
+	overflow_count++;
+	if (overflow_count >= 10) TCCR4B = 0;
 }
-#endif
 
-#if defined(VERSION_1_2)
-// mwheel
-ISR(INT6_vect)
+uint8_t reverse_bits(uint8_t b)
 {
-	if ((PINE >> PORTE6) & 1){ // A is HIGH
-
-		dmwheel = !((PIND >> PORTD2) & 1)? 1: -1;
-	}
-	else{ // A is LOW
-		dmwheel = ((PIND >> PORTD2) & 1)? 1: -1;
-	}
-	EIFR |= (1 << INTF6) | (1 << INTF2);
+	b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+	b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+	b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+	return b;
 }
-#elif defined(VERSION_2_0)
+
+void set_neo_rgb(uint8_t r, uint8_t g, uint8_t b)
+{	
+	uint8_t r_rev = reverse_bits(r);
+	uint8_t g_rev = reverse_bits(g);
+	uint8_t b_rev = reverse_bits(b);
+	// bit send order: (first) G7 ... G0, R7 ... R0, B7 ... B0 (last)
+	uint32_t brg = ((uint32_t)b_rev << 16) | ((uint32_t)r_rev << 8) | g_rev;
+	brg &= 0x00ffffff;
+	uint8_t* pb_addr = &PORTB;
+	uint8_t cnt = 10;
+	
+	//asm("head:"
+		//"\n\t"
+		//"out %a[pb_addr], 0x20"
+		//"\n\t"
+		//"out %a[pb_addr], 0x00"
+		//"\n\t"
+		//"dec %[cnt]"
+		//"\n\t"
+		//"cpi %[cnt], 0x00"
+		//"\n\t"
+		//"brne head"
+		//"\n"
+		//: [pb_addr] "+e"(pb_addr), [cnt] "+r"(cnt));
+	
+	//unsigned char sreg;
+	//sreg = SREG;
+	//cli(); // disable interrupts
+//
+	//volatile uint16_t i = numBytes; // Loop counter
+	//volatile uint8_t *ptr = pixels, // Pointer to next byte
+		//b = *ptr++,                 // Current byte value
+		//hi,                         // PORT w/output bit set high
+		//lo;                         // PORT w/output bit set low
+	//volatile uint8_t n1, n2 = 0; // First, next bits out
+    //// Same as above, just switched to PORTB and stripped of comments.
+    //hi = PORTB | pinMask;
+    //lo = PORTB & ~pinMask;
+    //n1 = lo;
+    //if (b & 0x80)
+    //n1 = hi;
+
+    //asm volatile(
+        //"headB:"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n2]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n1]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"sbrc %[byte] , 6"
+        //"\n\t"
+        //"mov %[n2]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n1]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n2]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"sbrc %[byte] , 5"
+        //"\n\t"
+        //"mov %[n1]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n2]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n1]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"sbrc %[byte] , 4"
+        //"\n\t"
+        //"mov %[n2]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n1]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n2]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"sbrc %[byte] , 3"
+        //"\n\t"
+        //"mov %[n1]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n2]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n1]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"sbrc %[byte] , 2"
+        //"\n\t"
+        //"mov %[n2]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n1]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n2]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"sbrc %[byte] , 1"
+        //"\n\t"
+        //"mov %[n1]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n2]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n1]"
+        //"\n\t"
+        //"rjmp .+0"
+        //"\n\t"
+        //"sbrc %[byte] , 0"
+        //"\n\t"
+        //"mov %[n2]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"sbiw %[count], 1"
+        //"\n\t"
+        //"out  %[port] , %[hi]"
+        //"\n\t"
+        //"mov  %[n1]   , %[lo]"
+        //"\n\t"
+        //"out  %[port] , %[n2]"
+        //"\n\t"
+        //"ld   %[byte] , %a[ptr]+"
+        //"\n\t"
+        //"sbrc %[byte] , 7"
+        //"\n\t"
+        //"mov %[n1]   , %[hi]"
+        //"\n\t"
+        //"out  %[port] , %[lo]"
+        //"\n\t"
+        //"brne headB"
+        //"\n"
+        //: [byte] "+r"(b), [n1] "+r"(n1), [n2] "+r"(n2), [count] "+w"(i)
+        //: [port] "I"(_SFR_IO_ADDR(PORTB)), [ptr] "e"(ptr), [hi] "r"(hi),
+        //[lo] "r"(lo)
+	//);
+	
+	
+	//SREG = sreg;
+
+}
+
 // mwheel
 ISR(INT0_vect)
 {
-	if ((PINE >> PORTE6) & 1){ // A is HIGH
+	_delay_us(500); // crude debouncing
+	if ((PIND >> PORTD0) & 1){ // A is HIGH
 
-		dmwheel = !((PIND >> PORTD2) & 1)? 1: -1;
+		dmwheel = !((PIND >> PORTD1) & 1)? -1: 1;
 	}
 	else{ // A is LOW
-		dmwheel = ((PIND >> PORTD2) & 1)? 1: -1;
+		dmwheel = ((PIND >> PORTD1) & 1)? -1: 1;
 	}
-	EIFR |= (1 << INTF6) | (1 << INTF2);
+	EIFR |= (1 << INTF0);
 }
-#endif
+
+// dpi button
+ISR(PCINT0_vect)
+{
+	_delay_us(500); // crude debouncing
+	if(!(PINB & (1 << PINB4)))
+	{
+		dpi_index++;
+		if (dpi_index >= DPI_PROFILE_COUNT) dpi_index = 0;
+		SS_LOW;
+		spiWrite(CONFIG1, dpi_profiles[dpi_index]);
+		SS_HIGH;
+		//set_neo_rgb(dpi_colours[dpi_index]);
+	}
+}
 
 int main(void)
 {
-	// dpi settings
-	uint8_t dpi_index = 2;
-	uint8_t dpis[] = {3, 7, 15};
-	
+
 	union MotionData dx, dy;
 	
 	init_pins();
 	init_interrupts();
-	#if defined(VERSION_1_2)
-	init_pwm();
-	#endif
+
+	//init_pwm();
+
 	init_spi();
-	init_pmw3360(dpis[dpi_index]);
+	init_pmw3360(dpi_profiles[dpi_index]);
 	usb_init();
 	while(!usb_configured());
 	_delay_ms(500);
@@ -305,6 +462,8 @@ int main(void)
 	
 	uint8_t button_state[MAX_CHECKS];
 	uint8_t index = 0;
+	
+	//set_neo_rgb(200,200,0);
 	
 	while (1)
 	{
@@ -338,8 +497,8 @@ int main(void)
 		uint8_t mouse1 = (debounced_state >> PORTD3) & 1;
 		uint8_t mouse2 = (debounced_state >> PORTD2) & 1;
 		uint8_t mouse3 = (debounced_state >> PORTD5) & 1;
-		uint8_t mouse4 = (debounced_state >> PORTD4) & 1;
-		uint8_t mouse5 = (debounced_state >> PORTD6) & 1;
+		uint8_t mouse4 = (debounced_state >> PORTD6) & 1;
+		uint8_t mouse5 = (debounced_state >> PORTD4) & 1;
 		usb_mouse_buttons(mouse1, mouse3, mouse2, mouse4, mouse5);
 	}
 }
