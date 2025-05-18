@@ -2,7 +2,7 @@
  * GccApplication1.c
  *
  * Created: 2/27/2025 11:46:12 PM
- * Author : XxPan
+ * Author : Andrew Ye
  */ 
 
 #define F_CPU 16000000UL // 16 MHz
@@ -20,12 +20,15 @@
 
 #define MAX_CHECKS 8
 
+#define DPI_INDEX_ADDR 0x0
+
 //#define VERSION_1_2
 #define VERSION_2_0
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
+#include <avr/eeprom.h>
 #include <util/delay.h>
 
 #include "usb_mouse.h"
@@ -33,32 +36,38 @@
 #include "srom_3360_0x03.h"
 #include "pmw3360_registers.h"
 
-void init_pins();
-void init_pwm();
-static void init_spi();
-static inline void spi_send(const uint8_t);
-static inline uint8_t spi_recv();
-static void init_pmw3360(const uint8_t);
-void set_rgb(uint8_t, uint8_t, uint8_t);
-uint8_t reverse_bits(uint8_t);
-
 // use this instead of bitshifts or LSB/MSB macros.
 union MotionData {
 	int16_t all;
 	struct { uint8_t lo, hi; };
 };
 
-volatile int8_t dmwheel = 0;
+union SK6805_RGB {
+	struct {
+		uint8_t g;
+		uint8_t r;
+		uint8_t b;
+	} colour;
+	
+	uint32_t data;
+};
 
+void init_pins();
+void init_timer();
+void init_interrupts();
+static void init_spi();
+static inline void spi_send(const uint8_t);
+static inline uint8_t spi_recv();
+static inline void spiWrite(const uint8_t, const uint8_t);
+static inline uint8_t spiRead(const uint8_t);
+static void init_pmw3360(const uint8_t);
+void set_neo_rgb(union SK6805_RGB);
+
+volatile int8_t dmwheel = 0;
 volatile uint8_t dpi_index = 1;
 const uint8_t dpi_profiles[] = {3, 7, 19, 39, 119}; // 400, 800, 2000, 4000, 12000
-const uint8_t dpi_colours[][3] = {{255, 90, 90}, {225, 255, 90}, {90, 255, 180}, {90, 115, 255}, {150, 90, 255}}; // red, yellow, teal, blue, lavender
 #define DPI_PROFILE_COUNT sizeof(dpi_profiles) / sizeof(dpi_profiles[0])
-
-#define NEO_PORT PORTB
-#define NEO_PIN PORTB5
-
-volatile uint8_t overflow_count = 0;
+union SK6805_RGB dpi_colours[DPI_PROFILE_COUNT]; 
 
 void init_pins(void)
 {
@@ -76,6 +85,19 @@ void init_pins(void)
 	
 	// neopixel data
 	DDRB |= (1 << PORTB5);
+}
+
+void init_timer()
+{
+	unsigned char sreg;
+	sreg = SREG;
+	cli();
+	
+	// no output on Output Compare pins, timer1 in normal mode (TOP = 65536)
+	TCCR1B = (1 << CS12) | (1 << CS10); // prescaler = 1024
+	TIMSK1 = (1 << TOIE1); // enable timer overflow interrupt
+	
+	SREG = sreg;
 }
 
 void init_interrupts()
@@ -196,219 +218,76 @@ static void init_pmw3360(const uint8_t dpi)
 	_delay_us(200);
 }
 
-void init_pwm()
-{
-	unsigned char sreg;
-	sreg = SREG; // Save global interrupt flag
-	cli(); // Disable interrupts
 
-	// Timer 4
-	OCR4B = 10; // 50% duty
-	OCR4C = 20;
-	TCCR4A = (1 << COM4B0) | (1 << PWM4B); // clear on compare match 
-	TCCR4B = (1 << CS40); // enable timer, no prescaler
-	TCCR4D &= 0b11111100; // waveform generator mode 4[1:0] = 00, fast PWM
+void set_neo_rgb(union SK6805_RGB rgb)
+{		
+	asm("mov xl,%[g_byte]"
+	"\n\tmov xh,%[r_byte]"
+	"\n\tmov yl,%[b_byte]"
 	
-	TIMSK4 = (1 << TOIE4);
+	"\n\tldi zl,8" 
+	"\ng_loop_%=:"
+	"\n\tsbi %[port],%[pin]"
+	"\n\tnop"
+	"\n\tlsl xl" 
+	"\n\tbrcs g_keephi_%=" 
+	"\n\tcbi %[port],%[pin]"
+	"\ng_keephi_%=:"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tcbi %[port],%[pin]"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tdec zl"
+	"\n\tbrne g_loop_%="
 	
-	SREG = sreg; // Restore global interrupt flag
-}
-
-ISR(TIMER4_OVF_vect)
-{
-	overflow_count++;
-	if (overflow_count >= 10) TCCR4B = 0;
-}
-
-uint8_t reverse_bits(uint8_t b)
-{
-	b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
-	b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
-	b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
-	return b;
-}
-
-void set_neo_rgb(uint8_t r, uint8_t g, uint8_t b)
-{	
-	uint8_t r_rev = reverse_bits(r);
-	uint8_t g_rev = reverse_bits(g);
-	uint8_t b_rev = reverse_bits(b);
-	// bit send order: (first) G7 ... G0, R7 ... R0, B7 ... B0 (last)
-	uint32_t brg = ((uint32_t)b_rev << 16) | ((uint32_t)r_rev << 8) | g_rev;
-	brg &= 0x00ffffff;
-	uint8_t* pb_addr = &PORTB;
-	uint8_t cnt = 10;
+	"\n\tldi zl,8"
+	"\nr_loop_%=:"
+	"\n\tsbi %[port],%[pin]"
+	"\n\tnop"
+	"\n\tlsl xh"
+	"\n\tbrcs r_keephi_%="
+	"\n\tcbi %[port],%[pin]"
+	"\nr_keephi_%=:"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tcbi %[port],%[pin]"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tdec zl"
+	"\n\tbrne r_loop_%="
 	
-	//asm("head:"
-		//"\n\t"
-		//"out %a[pb_addr], 0x20"
-		//"\n\t"
-		//"out %a[pb_addr], 0x00"
-		//"\n\t"
-		//"dec %[cnt]"
-		//"\n\t"
-		//"cpi %[cnt], 0x00"
-		//"\n\t"
-		//"brne head"
-		//"\n"
-		//: [pb_addr] "+e"(pb_addr), [cnt] "+r"(cnt));
+	"\n\tldi zl,8"
+	"\nb_loop_%=:"
+	"\n\tsbi %[port],%[pin]"
+	"\n\tnop"
+	"\n\tlsl yl"
+	"\n\tbrcs b_keephi_%="
+	"\n\tcbi %[port],%[pin]"
+	"\nb_keephi_%=:"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tcbi %[port],%[pin]"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tnop"
+	"\n\tdec zl"
+	"\n\tbrne b_loop_%="
+	: 
+	: [port] "I"(0x05), [pin] "I"(5), [g_byte] "r" (rgb.colour.g), [r_byte] "r" (rgb.colour.r), [b_byte] "r" (rgb.colour.b));
 	
-	//unsigned char sreg;
-	//sreg = SREG;
-	//cli(); // disable interrupts
-//
-	//volatile uint16_t i = numBytes; // Loop counter
-	//volatile uint8_t *ptr = pixels, // Pointer to next byte
-		//b = *ptr++,                 // Current byte value
-		//hi,                         // PORT w/output bit set high
-		//lo;                         // PORT w/output bit set low
-	//volatile uint8_t n1, n2 = 0; // First, next bits out
-    //// Same as above, just switched to PORTB and stripped of comments.
-    //hi = PORTB | pinMask;
-    //lo = PORTB & ~pinMask;
-    //n1 = lo;
-    //if (b & 0x80)
-    //n1 = hi;
-
-    //asm volatile(
-        //"headB:"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n2]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n1]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"sbrc %[byte] , 6"
-        //"\n\t"
-        //"mov %[n2]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n1]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n2]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"sbrc %[byte] , 5"
-        //"\n\t"
-        //"mov %[n1]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n2]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n1]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"sbrc %[byte] , 4"
-        //"\n\t"
-        //"mov %[n2]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n1]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n2]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"sbrc %[byte] , 3"
-        //"\n\t"
-        //"mov %[n1]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n2]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n1]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"sbrc %[byte] , 2"
-        //"\n\t"
-        //"mov %[n2]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n1]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n2]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"sbrc %[byte] , 1"
-        //"\n\t"
-        //"mov %[n1]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n2]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n1]"
-        //"\n\t"
-        //"rjmp .+0"
-        //"\n\t"
-        //"sbrc %[byte] , 0"
-        //"\n\t"
-        //"mov %[n2]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"sbiw %[count], 1"
-        //"\n\t"
-        //"out  %[port] , %[hi]"
-        //"\n\t"
-        //"mov  %[n1]   , %[lo]"
-        //"\n\t"
-        //"out  %[port] , %[n2]"
-        //"\n\t"
-        //"ld   %[byte] , %a[ptr]+"
-        //"\n\t"
-        //"sbrc %[byte] , 7"
-        //"\n\t"
-        //"mov %[n1]   , %[hi]"
-        //"\n\t"
-        //"out  %[port] , %[lo]"
-        //"\n\t"
-        //"brne headB"
-        //"\n"
-        //: [byte] "+r"(b), [n1] "+r"(n1), [n2] "+r"(n2), [count] "+w"(i)
-        //: [port] "I"(_SFR_IO_ADDR(PORTB)), [ptr] "e"(ptr), [hi] "r"(hi),
-        //[lo] "r"(lo)
-	//);
-	
-	
-	//SREG = sreg;
-
+	_delay_us(80);
 }
 
 // mwheel
@@ -434,10 +313,29 @@ ISR(PCINT0_vect)
 		dpi_index++;
 		if (dpi_index >= DPI_PROFILE_COUNT) dpi_index = 0;
 		SS_LOW;
-		spiWrite(CONFIG1, dpi_profiles[dpi_index]);
+		spiWrite(CONFIG1, dpi_profiles[dpi_index]); // set dpi in sensor
 		SS_HIGH;
-		//set_neo_rgb(dpi_colours[dpi_index]);
+		set_neo_rgb(dpi_colours[dpi_index]); // set dpi indicator led
+		
+		eeprom_write_byte(DPI_INDEX_ADDR, dpi_index);
+		
+		unsigned char sreg;
+		sreg = SREG;
+		cli();
+		
+		TCNT1 = 0x0000; // reset timer
+		TCCR1B = (1 << CS12) | (1 << CS10); // start timer, prescaler = 1024
+		
+		SREG = sreg;
 	}
+}
+
+ISR(TIMER1_OVF_vect)
+{
+	union SK6805_RGB black;
+	black.data = 0;
+	set_neo_rgb(black); // turn off dpi indicator led
+	TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10)); // turn off timer
 }
 
 int main(void)
@@ -445,25 +343,37 @@ int main(void)
 
 	union MotionData dx, dy;
 	
+	dpi_colours[0].colour.r = 255; // orange
+	dpi_colours[0].colour.g = 127;
+	dpi_colours[0].colour.b = 0;
+	dpi_colours[1].colour.r = 0; // teal
+	dpi_colours[1].colour.g = 255;
+	dpi_colours[1].colour.b = 200;
+	dpi_colours[2].colour.r = 0; // blue
+	dpi_colours[2].colour.g = 127;
+	dpi_colours[2].colour.b = 255;
+	dpi_colours[3].colour.r = 127; // purple
+	dpi_colours[3].colour.g = 0;
+	dpi_colours[3].colour.b = 255;
+	dpi_colours[4].colour.r = 255; // pink
+	dpi_colours[4].colour.g = 0;
+	dpi_colours[4].colour.b = 255;
+	
+	dpi_index = eeprom_read_byte(DPI_INDEX_ADDR);
+	
 	init_pins();
+	init_timer();
 	init_interrupts();
-
-	//init_pwm();
-
 	init_spi();
 	init_pmw3360(dpi_profiles[dpi_index]);
 	usb_init();
 	while(!usb_configured());
 	_delay_ms(500);
 	
-	uint8_t red = 0;
-	uint8_t green = 0;
-	uint8_t blue = 0;
-	
 	uint8_t button_state[MAX_CHECKS];
 	uint8_t index = 0;
 	
-	//set_neo_rgb(200,200,0);
+	set_neo_rgb(dpi_colours[dpi_index]);
 	
 	while (1)
 	{
