@@ -4,3 +4,4 @@ datasheets
 **/*.zip
 **/OldVersions
 **/Debug
+**/.vs/
