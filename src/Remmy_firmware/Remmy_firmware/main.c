@@ -32,7 +32,6 @@
 #include <util/delay.h>
 
 #include "usb_mouse.h"
-#include "circle.h"
 #include "srom_3360_0x03.h"
 #include "pmw3360_registers.h"
 
@@ -72,12 +71,12 @@ union SK6805_RGB dpi_colours[DPI_PROFILE_COUNT];
 void init_pins(void)
 {
 	// mouse buttons: L, R, Side 1, Side 2, MWheel button
-	DDRD &= ~((1 << PORTD3) | (1 << PORTD2) | (1 << PORTD4) | (1 << PORTD6) | (1 << PORTD5));
-	PORTD |= (1 << PORTD3) | (1 << PORTD2) | (1 << PORTD4) | (1 << PORTD6) | (1 << PORTD5); // enable pullups
+	DDRD &= ~((1 << PORTD5) | (1 << PORTD0) | (1 << PORTD1) | (1 << PORTD4) | (1 << PORTD6));
+	PORTD |= (1 << PORTD5) | (1 << PORTD0) | (1 << PORTD1) | (1 << PORTD4) | (1 << PORTD6); // enable pullups
 
     // MWheel
-	DDRD &= ~((1 << PORTD0) | (1 << PORTD1));
-	PORTD |= (1 << PORTD0) | (1 << PORTD1); // enable pullups
+	DDRD &= ~((1 << PORTD3) | (1 << PORTD2));
+	PORTD |= (1 << PORTD3) | (1 << PORTD2); // enable pullups
 	
 	// dpi button
 	DDRB &= ~(1 << PORTB4);
@@ -103,14 +102,14 @@ void init_timer()
 void init_interrupts()
 {
 	// mwheel
-    EICRA |= (1 << ISC00); // int triggers on either falling or rising edge
-    EIMSK |= (1 << INT0);
+    EICRA |= (1 << ISC30); // int triggers on either falling or rising edge
+    EIMSK |= (1 << INT3);
 	
 	// dpi button
 	PCICR |= (1 << PCIE0); // enable pin change interrupt
 	PCMSK0 |= (1 << PCINT4); // PB4
 
-	sei(); // enable global interrupts
+	//sei(); // enable global interrupts
 }
 
 // spi functions
@@ -216,6 +215,10 @@ static void init_pmw3360(const uint8_t dpi)
 	spiWrite(RAWDATA_THRESHOLD, 0x0a); // Minimum Valid features (reduce SQUAL score) (default: 0x0a)
 	SS_HIGH;
 	_delay_us(200);
+	
+	SS_LOW;
+	volatile uint8_t id = spiRead(0x00);
+	SS_HIGH;
 }
 
 
@@ -291,17 +294,17 @@ void set_neo_rgb(union SK6805_RGB rgb)
 }
 
 // mwheel
-ISR(INT0_vect)
+ISR(INT3_vect)
 {
 	_delay_us(500); // crude debouncing
-	if ((PIND >> PORTD0) & 1){ // A is HIGH
+	if ((PIND >> PORTD3) & 1){ // A is HIGH
 
-		dmwheel = !((PIND >> PORTD1) & 1)? -1: 1;
+		dmwheel = !((PIND >> PORTD2) & 1)? -1: 1;
 	}
 	else{ // A is LOW
-		dmwheel = ((PIND >> PORTD1) & 1)? -1: 1;
+		dmwheel = ((PIND >> PORTD2) & 1)? -1: 1;
 	}
-	EIFR |= (1 << INTF0);
+	EIFR |= (1 << INTF3);
 }
 
 // dpi button
@@ -338,42 +341,46 @@ ISR(TIMER1_OVF_vect)
 	TCCR1B &= ~((1 << CS12) | (1 << CS11) | (1 << CS10)); // turn off timer
 }
 
+union MotionData dx, dy;
+volatile uint8_t id;
+
 int main(void)
 {
 
-	union MotionData dx, dy;
 	
-	dpi_colours[0].colour.r = 255; // orange
-	dpi_colours[0].colour.g = 127;
-	dpi_colours[0].colour.b = 0;
-	dpi_colours[1].colour.r = 0; // teal
-	dpi_colours[1].colour.g = 255;
-	dpi_colours[1].colour.b = 200;
-	dpi_colours[2].colour.r = 0; // blue
-	dpi_colours[2].colour.g = 127;
-	dpi_colours[2].colour.b = 255;
-	dpi_colours[3].colour.r = 127; // purple
-	dpi_colours[3].colour.g = 0;
-	dpi_colours[3].colour.b = 255;
-	dpi_colours[4].colour.r = 255; // pink
-	dpi_colours[4].colour.g = 0;
-	dpi_colours[4].colour.b = 255;
-	
-	dpi_index = eeprom_read_byte(DPI_INDEX_ADDR);
-	
-	init_pins();
-	init_timer();
-	init_interrupts();
+	//
+	//dpi_colours[0].colour.r = 255; // orange
+	//dpi_colours[0].colour.g = 127;
+	//dpi_colours[0].colour.b = 0;
+	//dpi_colours[1].colour.r = 0; // teal
+	//dpi_colours[1].colour.g = 255;
+	//dpi_colours[1].colour.b = 200;
+	//dpi_colours[2].colour.r = 0; // blue
+	//dpi_colours[2].colour.g = 127;
+	//dpi_colours[2].colour.b = 255;
+	//dpi_colours[3].colour.r = 127; // purple
+	//dpi_colours[3].colour.g = 0;
+	//dpi_colours[3].colour.b = 255;
+	//dpi_colours[4].colour.r = 255; // pink
+	//dpi_colours[4].colour.g = 0;
+	//dpi_colours[4].colour.b = 255;
+	//
+	//dpi_index = eeprom_read_byte(DPI_INDEX_ADDR);
+	//
+	//init_pins();
+	//init_timer();
+	//init_interrupts();
 	init_spi();
 	init_pmw3360(dpi_profiles[dpi_index]);
-	usb_init();
-	while(!usb_configured());
-	_delay_ms(500);
+	
+	//usb_init();
+	//while(!usb_configured());
+	//_delay_ms(500);
 	
 	uint8_t button_state[MAX_CHECKS];
 	uint8_t index = 0;
 	
-	set_neo_rgb(dpi_colours[dpi_index]);
+	//set_neo_rgb(dpi_colours[dpi_index]);
 	
 	while (1)
 	{
@@ -392,11 +399,11 @@ int main(void)
 		dy.lo = spi_recv();
 		dy.hi = spi_recv();
 		SS_HIGH;
-		usb_mouse_move(dx.all, dy.all, dmwheel);
+		//usb_mouse_move(dx.all, dy.all, dmwheel);
 		dmwheel = 0;
 		
 		// buttons
-		button_state[index] = PIND & 0b01111100;
+		button_state[index] = PIND & 0b01110011;
 		index++;
 		uint8_t debounced_state = 0xff;
 		uint8_t i;
@@ -404,11 +411,11 @@ int main(void)
 		if (index >= MAX_CHECKS) index = 0;
 		debounced_state = ~debounced_state; // buttons are active low
 		
-		uint8_t mouse1 = (debounced_state >> PORTD3) & 1;
-		uint8_t mouse2 = (debounced_state >> PORTD2) & 1;
-		uint8_t mouse3 = (debounced_state >> PORTD5) & 1;
-		uint8_t mouse4 = (debounced_state >> PORTD6) & 1;
-		uint8_t mouse5 = (debounced_state >> PORTD4) & 1;
-		usb_mouse_buttons(mouse1, mouse3, mouse2, mouse4, mouse5);
+		uint8_t mouse1 = (debounced_state >> PORTD5) & 1;
+		uint8_t mouse2 = (debounced_state >> PORTD0) & 1;
+		uint8_t mouse3 = (debounced_state >> PORTD1) & 1;
+		uint8_t mouse4 = (debounced_state >> PORTD4) & 1;
+		uint8_t mouse5 = (debounced_state >> PORTD6) & 1;
+		//usb_mouse_buttons(mouse1, mouse3, mouse2, mouse4, mouse5);
 	}
 }

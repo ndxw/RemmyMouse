@@ -1,4 +1,4 @@
-24452746443724938
+24454496681714289
 Audio_Module
 Reverb_BTDR-1H
 Digital Reverberation Unit, http://www.belton.co.kr/inc/downfile.php?seq=17&file=pdf (footprint from http://www.uk-electronic.de/PDF/BTDR-1.pdf)
@@ -58255,14 +58255,14 @@ TPS73219DBVT
 5
 Imported_FP
 HSFPAR004A
-HSFPAR004A-3
+HSFPAR004A-3 piezoelectric force sensor
 Integrated Circuit
 0
 5
 5
 Imported_FP
 OMGS3
-
+10x25mm ESP32-S3 microcontroller board
 
 0
 26
@@ -58276,14 +58276,14 @@ Optical sensor
 10
 Imported_FP
 PQFN80P500X300X100-14N
-
+ADXL345
 
 0
 14
 14
 Imported_FP
 R-667_MIT
-
+4x4mm low profile normally off tactile pushbutton
 R-667842 
 0
 4
@@ -58317,8 +58317,15 @@ SOT95P280X145-5N
 5
 5
 Imported_FP
-USB-C_16+8_dummy
+USB-C_16+8_dummy_SMD
+USB-C receptacle 16-pin SMD with board guides
 
+0
+16
+16
+Imported_FP
+USB-C_16+8_dummy_THT
+USB-C receptacle 16-pin THT with board guides
 
 0
 20
